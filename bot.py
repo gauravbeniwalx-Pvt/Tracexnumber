@@ -50,12 +50,11 @@ SUPABASE_SERVICE_ROLE_KEY = get_env_var("SUPABASE_SERVICE_ROLE_KEY", required=Fa
 LOOKUP_API_BASE = "https://gauravbeniwal.online/lookupportal/api/lookup.php"
 UTR_VERIFY_API = "https://upipaymentgatewayhdfc.onrender.com/verify-utr"
 
-# Required channels (must join all)
 REQUIRED_CHANNELS = [
-    {"name": "Gaurav Beniwal", "username": "@Gaurav_beni_0001", "link": "https://t.me/Gaurav_beni_0001"},
-    {"name": "Beniwal Mods", "username": "@beniwalmods", "link": "https://t.me/beniwalmods"},
-    {"name": "Beniwalzon YT", "username": "@BeniwalzonYT", "link": "https://t.me/BeniwalzonYT"},
-    {"name": "Private Community", "username": "", "link": "https://t.me/+j7KaRgC8l14zODc1"},
+    {"name": "Gaurav Beniwal", "id": "@Gaurav_beni_0001", "link": "https://t.me/Gaurav_beni_0001"},
+    {"name": "Beniwal Mods", "id": "@beniwalmods", "link": "https://t.me/beniwalmods"},
+    {"name": "Beniwalzon YT", "id": "@BeniwalzonYT", "link": "https://t.me/BeniwalzonYT"},
+    {"name": "Private Community", "id": -1003004551707, "link": "https://t.me/+j7KaRgC8l14zODc1"},
 ]
 
 # Services
@@ -964,17 +963,16 @@ After payment, send the UTR number (12 digits).
         bot.send_message(chat_id, caption, reply_markup=markup, parse_mode="Markdown")
 
 # ==================== CHANNEL CHECK ====================
-def is_channel_member(user_id, channel_username):
+def is_channel_member(user_id, channel_id):
     if str(user_id) == str(ADMIN_ID):
         return True
-    if not channel_username:
-        return True  # Can't check without username
     try:
-        member = bot.get_chat_member(channel_username, user_id)
+        member = bot.get_chat_member(channel_id, user_id)
         return member.status in ["member", "administrator", "creator"]
     except Exception as e:
-        print(f"Channel check error for {channel_username}: {e}")
+        print(f"Channel check error for {channel_id}: {e}")
         return False
+
 
 def check_all_channels(user_id):
     if str(user_id) == str(ADMIN_ID):
@@ -982,10 +980,8 @@ def check_all_channels(user_id):
     
     missing = []
     for channel in REQUIRED_CHANNELS:
-        if channel['username']:
-            if not is_channel_member(user_id, channel['username']):
-                missing.append(channel)
-        # For private channels without username, we can't verify - assume joined
+        if not is_channel_member(user_id, channel['id']):
+            missing.append(channel)
     
     return len(missing) == 0, missing
 
