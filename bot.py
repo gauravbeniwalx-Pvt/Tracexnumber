@@ -1,6 +1,6 @@
 """
 TraceX Lookup Bot - FREE VERSION
-Version: 13.2.0 - Working inline buttons only
+Version: 13.3.0 - FIXED callback flow
 """
 
 import os
@@ -23,7 +23,6 @@ requests = _require_package("requests", "requests")
 import time
 import re
 import json
-from datetime import datetime, timedelta, timezone
 import threading
 import signal
 from flask import Flask
@@ -39,7 +38,7 @@ ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "gaurav_beniwal_0001")
 
 LOOKUP_API_BASE = "https://gauravbeniwal.online/lookupportal/api/lookup.php"
 WEBSITE_URL = "https://gauravbeniwal.online/lookupportal"
-BOT_VERSION = "13.2.0"
+BOT_VERSION = "13.3.0"
 
 RATE_LIMIT_SECONDS = 30
 TELEGRAM_SAFE_LIMIT = 3900
@@ -85,7 +84,6 @@ def footer():
     return f"\n\n━━━━━━━━━━━━━━━━\n🌐 {WEBSITE_URL}\n👨‍💻 @{ADMIN_USERNAME}"
 
 def get_main_menu_markup():
-    """Only inline buttons. Colourful via emojis."""
     markup = InlineKeyboardMarkup(row_width=2)
     markup.add(
         InlineKeyboardButton("📱 NUMBER INFO", callback_data="svc_number"),
@@ -232,7 +230,7 @@ def call_lookup_api(service, query):
         url = f"{LOOKUP_API_BASE}?service={service}&spell={query}"
         print(f"[LOOKUP] Service: {service}, Query: {query}")
         headers = {
-            "User-Agent": "Mozilla/5.0 (Linux; Android 16) TraceXBot/13.2.0",
+            "User-Agent": "Mozilla/5.0 (Linux; Android 16) TraceXBot/13.3.0",
             "Accept": "application/json",
         }
         response = requests.get(url, headers=headers, timeout=(10, 25))
@@ -294,6 +292,28 @@ To use this bot, join all channels below:
         return False
     return True
 
+# ==================== SERVICE PROMPT ====================
+def send_service_prompt(chat_id, service_key):
+    """Send the 'send me input' message for a service."""
+    svc = LOOKUP_SERVICES.get(service_key)
+    if not svc:
+        bot.send_message(chat_id, "❌ Invalid service.")
+        return
+    if service_key == "number":
+        msg = ("📱 <b>NUMBER INFO</b>\n"
+               "━━━━━━━━━━━━━━━━━━\n\n"
+               "Ab <b>10-digit mobile number</b> bhejo.\n\n"
+               "<b>Example:</b> <code>9876543210</code>\n\n"
+               "⏱️ Rate limit: 1 lookup / 30 sec")
+    else:
+        msg = ("💬 <b>TG TO NUMBER</b>\n"
+               "━━━━━━━━━━━━━━━━━━\n\n"
+               "Ab <b>Telegram username</b> bhejo.\n\n"
+               "<b>Example:</b> <code>username</code>\n\n"
+               "⏱️ Rate limit: 1 lookup / 30 sec")
+    bot.send_message(chat_id, msg, reply_markup=get_cancel_markup(),
+                     parse_mode='HTML', disable_web_page_preview=True)
+
 # ==================== LOOKUP PROCESSOR ====================
 def process_lookup(message):
     user_id = message.from_user.id
@@ -302,7 +322,8 @@ def process_lookup(message):
     if query_input == "/cancel":
         user_states.pop(user_id, None)
         remove_active_session(user_id)
-        bot.reply_to(message, "❌ <b>Cancelled.</b>", reply_markup=get_main_menu_markup(), parse_mode='HTML')
+        bot.reply_to(message, "❌ <b>Cancelled.</b>",
+                     reply_markup=get_main_menu_markup(), parse_mode='HTML')
         return
 
     state = user_states.get(user_id)
@@ -313,30 +334,41 @@ def process_lookup(message):
     user_states.pop(user_id, None)
     service = LOOKUP_SERVICES.get(service_key)
     if not service:
-        bot.reply_to(message, "❌ <b>Invalid service.</b>", reply_markup=get_main_menu_markup(), parse_mode='HTML')
+        bot.reply_to(message, "❌ <b>Invalid service.</b>",
+                     reply_markup=get_main_menu_markup(), parse_mode='HTML')
         return
 
     query_clean = query_input
     if service["query_type"] == "mobile":
         phone = normalize_indian_mobile(query_input)
         if not phone:
-            bot.reply_to(message, "❌ <b>Invalid number!</b>\n\nEnter 10-digit mobile number.",
-                         reply_markup=get_main_menu_markup(), parse_mode='HTML')
+            # Re-prompt, keep state so user can retry
+            user_states[user_id] = {"state": "awaiting_lookup", "service": service_key}
+            bot.reply_to(message,
+                "❌ <b>Invalid number!</b>\n\n"
+                "10-digit mobile number bhejo (6/7/8/9 se start).\n\n"
+                "<b>Example:</b> <code>9876543210</code>",
+                reply_markup=get_cancel_markup(), parse_mode='HTML')
             return
         query_clean = phone
     elif service["query_type"] == "username":
-        query_clean = query_input.lstrip('@')
-        if not query_clean or len(query_clean) < 3:
-            bot.reply_to(message, "❌ <b>Invalid username!</b>",
-                         reply_markup=get_main_menu_markup(), parse_mode='HTML')
+        query_clean = query_input.lstrip('@').strip()
+        if not query_clean or len(query_clean) < 3 or not re.match(r"^[A-Za-z0-9_]{3,32}$", query_clean):
+            user_states[user_id] = {"state": "awaiting_lookup", "service": service_key}
+            bot.reply_to(message,
+                "❌ <b>Invalid username!</b>\n\n"
+                "Valid Telegram username bhejo (3-32 chars, letters/numbers/_).\n\n"
+                "<b>Example:</b> <code>username</code>",
+                reply_markup=get_cancel_markup(), parse_mode='HTML')
             return
 
     now = time.time()
     last = user_last_lookup.get(user_id, 0)
     if now - last < RATE_LIMIT_SECONDS and str(user_id) != str(ADMIN_ID):
         wait_time = int(RATE_LIMIT_SECONDS - (now - last))
-        bot.reply_to(message, f"⏳ <b>Wait {wait_time}s</b>\n\nRate limit: 1 lookup / 30 sec.",
-                     reply_markup=get_main_menu_markup(), parse_mode='HTML')
+        bot.reply_to(message,
+            f"⏳ <b>Wait {wait_time}s</b>\n\nRate limit: 1 lookup / 30 sec.",
+            reply_markup=get_main_menu_markup(), parse_mode='HTML')
         return
 
     if is_active_session(user_id):
@@ -356,27 +388,21 @@ def process_lookup(message):
         result = call_lookup_api(service_key, query_clean)
 
         if not result or result.get('error'):
-            output = f"""<b>{service['emoji']} {service['name'].upper()}</b>
-━━━━━━━━━━━━━━━━━━
-
-🔎 Query: <code>{escape_html(query_clean)}</code>
-
-<b>❌ Error</b>
-{format_json_for_telegram(result or {"error": "No response"})}"""
+            output = (f"<b>{service['emoji']} {service['name'].upper()}</b>\n"
+                      f"━━━━━━━━━━━━━━━━━━\n\n"
+                      f"🔎 Query: <code>{escape_html(query_clean)}</code>\n\n"
+                      f"<b>❌ Error</b>\n"
+                      f"{format_json_for_telegram(result or {'error': 'No response'})}")
             safe_edit_message(message.chat.id, loading_msg.message_id, output, parse_mode='HTML')
             return
 
         json_output = format_json_for_telegram(result)
-        output = f"""<b>{service['emoji']} {service['name'].upper()}</b>
-━━━━━━━━━━━━━━━━━━
-
-🔎 Query: <code>{escape_html(query_clean)}</code>
-
-📄 <b>Result:</b>
-{json_output}
-
-━━━━━━━━━━━━━━━━━━
-✅ <b>Lookup Complete</b>"""
+        output = (f"<b>{service['emoji']} {service['name'].upper()}</b>\n"
+                  f"━━━━━━━━━━━━━━━━━━\n\n"
+                  f"🔎 Query: <code>{escape_html(query_clean)}</code>\n\n"
+                  f"📄 <b>Result:</b>\n{json_output}\n\n"
+                  f"━━━━━━━━━━━━━━━━━━\n"
+                  f"✅ <b>Lookup Complete</b>")
         output += footer()
         send_or_edit_long_message(message.chat.id, loading_msg.message_id, output,
                                   reply_markup=lookup_result_markup(), parse_mode='HTML')
@@ -400,9 +426,8 @@ def start(message):
     user_id = message.from_user.id
     first_name = message.from_user.first_name or "User"
 
-    # Remove any old ReplyKeyboard (one-time cleanup)
     try:
-        rm = bot.send_message(message.chat.id, "🔄 Loading...",
+        rm = bot.send_message(message.chat.id, "🔄",
                               reply_markup=ReplyKeyboardRemove())
         bot.delete_message(message.chat.id, rm.message_id)
     except Exception as e:
@@ -413,24 +438,19 @@ def start(message):
         send_join_required(message.chat.id, missing)
         return
 
-    welcome_msg = f"""🚀 <b>TRACEX LOOKUP</b>
-━━━━━━━━━━━━━━━━━━
-
-👋 Welcome, <b>{escape_html(first_name)}</b>!
-
-✅ All channels joined.
-🎁 <b>100% FREE</b>
-⏱️ Rate limit: 1 lookup / 30 sec
-
-━━━━━━━━━━━━━━━━━━
-📋 <b>Choose a service:</b>
-
-📱 <b>Number Info</b>
-💬 <b>TG to Number</b>
-
-━━━━━━━━━━━━━━━━━━
-🌐 {WEBSITE_URL}
-👨‍💻 @{ADMIN_USERNAME}"""
+    welcome_msg = (f"🚀 <b>TRACEX LOOKUP</b>\n"
+                   f"━━━━━━━━━━━━━━━━━━\n\n"
+                   f"👋 Welcome, <b>{escape_html(first_name)}</b>!\n\n"
+                   f"✅ All channels joined.\n"
+                   f"🎁 <b>100% FREE</b>\n"
+                   f"⏱️ Rate limit: 1 lookup / 30 sec\n\n"
+                   f"━━━━━━━━━━━━━━━━━━\n"
+                   f"📋 <b>Choose a service:</b>\n\n"
+                   f"📱 <b>Number Info</b>\n"
+                   f"💬 <b>TG to Number</b>\n\n"
+                   f"━━━━━━━━━━━━━━━━━━\n"
+                   f"🌐 {WEBSITE_URL}\n"
+                   f"👨‍💻 @{ADMIN_USERNAME}")
 
     bot.send_message(message.chat.id, welcome_msg,
                      reply_markup=get_main_menu_markup(),
@@ -448,15 +468,22 @@ def cancel_command(message):
 @bot.message_handler(content_types=['text'])
 def text_handler(message):
     user_id = message.from_user.id
+
+    # If user is in lookup state, process first (no channel gate to avoid losing state)
+    state = user_states.get(user_id)
+    if isinstance(state, dict) and state.get("state") == "awaiting_lookup":
+        # Still verify channels silently
+        all_joined, missing = check_all_channels(user_id)
+        if not all_joined:
+            user_states.pop(user_id, None)
+            send_join_required(message.chat.id, missing)
+            return
+        process_lookup(message)
+        return
+
     all_joined, missing = check_all_channels(user_id)
     if not all_joined:
         send_join_required(message.chat.id, missing)
-        return
-
-    text = message.text.strip()
-    state = user_states.get(user_id)
-    if isinstance(state, dict) and state.get("state") == "awaiting_lookup":
-        process_lookup(message)
         return
 
     bot.reply_to(message, "👇 <b>Use the buttons below:</b>",
@@ -469,11 +496,20 @@ def callback_handler(call):
     data = call.data or ""
     print(f"[CB] user={user_id} data={data}")
 
-    # --- check_join handled FIRST, before channel gate ---
+    # ---- ALWAYS answer callback FIRST (prevents button 'dead' state) ----
+    try:
+        bot.answer_callback_query(call.id)
+    except Exception as e:
+        print(f"answer_cb error: {e}")
+
+    # ---- check_join special handling ----
     if data == "check_join":
         all_joined, missing = check_all_channels(user_id)
         if all_joined:
-            bot.answer_callback_query(call.id, "✅ Verified!", show_alert=True)
+            try:
+                bot.answer_callback_query(call.id, "✅ Verified!", show_alert=True)
+            except Exception:
+                pass
             try:
                 bot.edit_message_text(
                     "✅ <b>Verified!</b>\n\nUse the buttons below to start.",
@@ -489,25 +525,26 @@ def callback_handler(call):
                 except Exception as e2:
                     print(f"send after verify: {e2}")
         else:
-            bot.answer_callback_query(call.id,
-                f"❌ Missing: {', '.join([ch['name'] for ch in missing])}",
-                show_alert=True)
+            try:
+                bot.answer_callback_query(call.id,
+                    f"❌ Missing: {', '.join([ch['name'] for ch in missing])}",
+                    show_alert=True)
+            except Exception:
+                pass
             send_join_required(call.message.chat.id, missing)
         return
 
-    # --- Channel gate for everything else ---
+    # ---- Channel gate for other actions ----
     all_joined, missing = check_all_channels(user_id)
     if not all_joined:
-        bot.answer_callback_query(call.id, "❌ Join all channels first!", show_alert=True)
+        try:
+            bot.answer_callback_query(call.id, "❌ Join all channels first!", show_alert=True)
+        except Exception:
+            pass
         send_join_required(call.message.chat.id, missing)
         return
 
-    # --- Always answer callback quickly ---
-    try:
-        bot.answer_callback_query(call.id)
-    except Exception as e:
-        print(f"answer_cb error: {e}")
-
+    # ---- MAIN MENU ----
     if data == "main_menu":
         try:
             bot.edit_message_text(
@@ -516,40 +553,72 @@ def callback_handler(call):
                 reply_markup=get_main_menu_markup(), parse_mode='HTML')
         except Exception as e:
             print(f"main_menu edit err: {e}")
-            bot.send_message(call.message.chat.id,
-                             "🏠 <b>MAIN MENU</b>\n\n👇 Choose a service:",
-                             reply_markup=get_main_menu_markup(), parse_mode='HTML')
+            try:
+                bot.send_message(call.message.chat.id,
+                                 "🏠 <b>MAIN MENU</b>\n\n👇 Choose a service:",
+                                 reply_markup=get_main_menu_markup(), parse_mode='HTML')
+            except Exception as e2:
+                print(f"main_menu send err: {e2}")
+        return
 
-    elif data == "cancel":
+    # ---- CANCEL ----
+    if data == "cancel":
         user_states.pop(user_id, None)
         remove_active_session(user_id)
         try:
             bot.edit_message_text("❌ <b>Cancelled.</b>",
                                   call.message.chat.id, call.message.message_id,
                                   reply_markup=get_main_menu_markup(), parse_mode='HTML')
-        except Exception as e:
-            print(f"cancel edit err: {e}")
-            bot.send_message(call.message.chat.id, "❌ <b>Cancelled.</b>",
+        except Exception:
+            try:
+                bot.send_message(call.message.chat.id, "❌ <b>Cancelled.</b>",
+                                 reply_markup=get_main_menu_markup(), parse_mode='HTML')
+            except Exception:
+                pass
+        return
+
+    # ---- BACK TO LOOKUP ----
+    if data == "back_to_lookup":
+        try:
+            bot.send_message(call.message.chat.id, "👇 <b>Choose a service:</b>",
                              reply_markup=get_main_menu_markup(), parse_mode='HTML')
+        except Exception as e:
+            print(f"back_to_lookup err: {e}")
+        return
 
-    elif data == "back_to_lookup":
-        bot.send_message(call.message.chat.id, "👇 <b>Choose a service:</b>",
-                         reply_markup=get_main_menu_markup(), parse_mode='HTML')
-
-    elif data == "svc_number":
+    # ---- SERVICE: NUMBER INFO ----
+    if data == "svc_number":
         user_states[user_id] = {"state": "awaiting_lookup", "service": "number"}
-        bot.send_message(call.message.chat.id,
-            "📱 <b>NUMBER INFO</b>\n━━━━━━━━━━━━━━━━━━\n\nSend the 10-digit mobile number.\n\n<b>Example:</b> <code>9876543210</code>\n\n⏱️ Rate limit: 1 / 30 sec",
-            reply_markup=get_cancel_markup(), parse_mode='HTML')
+        print(f"[CB] state set for {user_id}: number")
+        try:
+            send_service_prompt(call.message.chat.id, "number")
+        except Exception as e:
+            print(f"svc_number send err: {e}")
+            try:
+                bot.send_message(call.message.chat.id,
+                                 "📱 Send 10-digit mobile number.\nExample: 9876543210",
+                                 reply_markup=get_cancel_markup())
+            except Exception as e2:
+                print(f"svc_number fallback err: {e2}")
+        return
 
-    elif data == "svc_telegram":
+    # ---- SERVICE: TG TO NUMBER ----
+    if data == "svc_telegram":
         user_states[user_id] = {"state": "awaiting_lookup", "service": "telegram"}
-        bot.send_message(call.message.chat.id,
-            "💬 <b>TG TO NUMBER</b>\n━━━━━━━━━━━━━━━━━━\n\nSend the Telegram username.\n\n<b>Example:</b> <code>username</code>\n\n⏱️ Rate limit: 1 / 30 sec",
-            reply_markup=get_cancel_markup(), parse_mode='HTML')
+        print(f"[CB] state set for {user_id}: telegram")
+        try:
+            send_service_prompt(call.message.chat.id, "telegram")
+        except Exception as e:
+            print(f"svc_telegram send err: {e}")
+            try:
+                bot.send_message(call.message.chat.id,
+                                 "💬 Send Telegram username.\nExample: username",
+                                 reply_markup=get_cancel_markup())
+            except Exception as e2:
+                print(f"svc_telegram fallback err: {e2}")
+        return
 
-    else:
-        print(f"[CB] unknown data: {data}")
+    print(f"[CB] unknown data: {data}")
 
 # ==================== FLASK ====================
 app = Flask(__name__)
@@ -592,7 +661,7 @@ if __name__ == "__main__":
     def signal_handler(sig, frame):
         print("\n🛑 Stopped")
         sys.exit(0)
-    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(sig, signal_handler)
 
     while True:
         try:
