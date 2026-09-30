@@ -1,6 +1,6 @@
 """
 TraceX Lookup Bot - FREE VERSION
-Version: 13.3.0 - FIXED callback flow
+Version: 13.4.0 - FULLY FIXED (signal bug + callback flow)
 """
 
 import os
@@ -38,7 +38,7 @@ ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "gaurav_beniwal_0001")
 
 LOOKUP_API_BASE = "https://gauravbeniwal.online/lookupportal/api/lookup.php"
 WEBSITE_URL = "https://gauravbeniwal.online/lookupportal"
-BOT_VERSION = "13.3.0"
+BOT_VERSION = "13.4.0"
 
 RATE_LIMIT_SECONDS = 30
 TELEGRAM_SAFE_LIMIT = 3900
@@ -230,7 +230,7 @@ def call_lookup_api(service, query):
         url = f"{LOOKUP_API_BASE}?service={service}&spell={query}"
         print(f"[LOOKUP] Service: {service}, Query: {query}")
         headers = {
-            "User-Agent": "Mozilla/5.0 (Linux; Android 16) TraceXBot/13.3.0",
+            "User-Agent": "Mozilla/5.0 (Linux; Android 16) TraceXBot/13.4.0",
             "Accept": "application/json",
         }
         response = requests.get(url, headers=headers, timeout=(10, 25))
@@ -294,11 +294,6 @@ To use this bot, join all channels below:
 
 # ==================== SERVICE PROMPT ====================
 def send_service_prompt(chat_id, service_key):
-    """Send the 'send me input' message for a service."""
-    svc = LOOKUP_SERVICES.get(service_key)
-    if not svc:
-        bot.send_message(chat_id, "❌ Invalid service.")
-        return
     if service_key == "number":
         msg = ("📱 <b>NUMBER INFO</b>\n"
                "━━━━━━━━━━━━━━━━━━\n\n"
@@ -342,7 +337,6 @@ def process_lookup(message):
     if service["query_type"] == "mobile":
         phone = normalize_indian_mobile(query_input)
         if not phone:
-            # Re-prompt, keep state so user can retry
             user_states[user_id] = {"state": "awaiting_lookup", "service": service_key}
             bot.reply_to(message,
                 "❌ <b>Invalid number!</b>\n\n"
@@ -469,10 +463,8 @@ def cancel_command(message):
 def text_handler(message):
     user_id = message.from_user.id
 
-    # If user is in lookup state, process first (no channel gate to avoid losing state)
     state = user_states.get(user_id)
     if isinstance(state, dict) and state.get("state") == "awaiting_lookup":
-        # Still verify channels silently
         all_joined, missing = check_all_channels(user_id)
         if not all_joined:
             user_states.pop(user_id, None)
@@ -496,13 +488,13 @@ def callback_handler(call):
     data = call.data or ""
     print(f"[CB] user={user_id} data={data}")
 
-    # ---- ALWAYS answer callback FIRST (prevents button 'dead' state) ----
+    # Always answer first
     try:
         bot.answer_callback_query(call.id)
     except Exception as e:
         print(f"answer_cb error: {e}")
 
-    # ---- check_join special handling ----
+    # check_join
     if data == "check_join":
         all_joined, missing = check_all_channels(user_id)
         if all_joined:
@@ -534,7 +526,7 @@ def callback_handler(call):
             send_join_required(call.message.chat.id, missing)
         return
 
-    # ---- Channel gate for other actions ----
+    # Channel gate
     all_joined, missing = check_all_channels(user_id)
     if not all_joined:
         try:
@@ -544,7 +536,6 @@ def callback_handler(call):
         send_join_required(call.message.chat.id, missing)
         return
 
-    # ---- MAIN MENU ----
     if data == "main_menu":
         try:
             bot.edit_message_text(
@@ -561,7 +552,6 @@ def callback_handler(call):
                 print(f"main_menu send err: {e2}")
         return
 
-    # ---- CANCEL ----
     if data == "cancel":
         user_states.pop(user_id, None)
         remove_active_session(user_id)
@@ -577,7 +567,6 @@ def callback_handler(call):
                 pass
         return
 
-    # ---- BACK TO LOOKUP ----
     if data == "back_to_lookup":
         try:
             bot.send_message(call.message.chat.id, "👇 <b>Choose a service:</b>",
@@ -586,7 +575,6 @@ def callback_handler(call):
             print(f"back_to_lookup err: {e}")
         return
 
-    # ---- SERVICE: NUMBER INFO ----
     if data == "svc_number":
         user_states[user_id] = {"state": "awaiting_lookup", "service": "number"}
         print(f"[CB] state set for {user_id}: number")
@@ -602,7 +590,6 @@ def callback_handler(call):
                 print(f"svc_number fallback err: {e2}")
         return
 
-    # ---- SERVICE: TG TO NUMBER ----
     if data == "svc_telegram":
         user_states[user_id] = {"state": "awaiting_lookup", "service": "telegram"}
         print(f"[CB] state set for {user_id}: telegram")
@@ -630,9 +617,8 @@ def home():
 def keep_alive():
     def run():
         port = int(os.getenv("PORT", "8080"))
-        app.run(host='0.0.0.0', port=port, use_reloader=False)
-    t = threading.Thread(target=run)
-    t.daemon = True
+        app.run(host='0.0.0.0', port=port, use_reloader=False, threaded=True)
+    t = threading.Thread(target=run, daemon=True)
     t.start()
 
 # ==================== START ====================
@@ -658,10 +644,15 @@ if __name__ == "__main__":
     print("✅ Bot running!")
     print("=" * 50)
 
-    def signal_handler(sig, frame):
+    def signal_handler(signum, frame):
         print("\n🛑 Stopped")
         sys.exit(0)
-    signal.signal(sig, signal_handler)
+
+    try:
+        signal.signal(signal.SIGINT, signal_handler)
+        signal.signal(signal.SIGTERM, signal_handler)
+    except (ValueError, AttributeError) as e:
+        print(f"Signal handler setup skipped: {e}")
 
     while True:
         try:
