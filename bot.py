@@ -1,25 +1,13 @@
 """
 TraceX Lookup Bot - Premium Telecom Lookup Bot
-Version: 13.0.0
+Version: 13.0.1
 
-CHANGES FROM v12
-----------------
-1. No daily free quota.
-2. Every newly-created user receives 3 LIFETIME free lookups.
-3. Number Info = 3 credits.
-4. TG to Number = 10 credits.
-5. Free quota is combined across both services.
-6. Existing telegram_users schema remains compatible.
-7. Existing `daily_free_used` column is reused as lifetime free usage.
-8. `daily_reset_date` is NOT reset anymore.
-9. Unlimited plan remains compatible with existing unlimited_expiry.
-10. Better validation, locking, payment handling and error handling.
-11. Credits are deducted ONLY after a successful lookup result.
-12. Failed / empty lookup does not consume free lookup or credits.
-13. Existing payment_claims table is reused.
-14. Existing Supabase REST API wrapper is retained.
-15. Existing channel subscription system retained.
-16. Existing admin credit/ban system retained.
+CHANGES FROM v13.0.0
+--------------------
+1.  FIXED: API call now uses 'query' parameter instead of 'spell' to match the backend.
+2.  FIXED: Added 'api_key' to the lookup API request. It's now configured via 'LOOKUP_API_KEY'.
+3.  IMPROVED: Result formatting for 'number' and 'telegram' lookups now correctly parses the 'data' array.
+4.  IMPROVED: 'has_valid_results' function is more robust and correctly identifies successful lookups.
 """
 
 import os
@@ -96,24 +84,16 @@ SUPABASE_SERVICE_ROLE_KEY = env(
 # AUTHORIZED LOOKUP BACKEND
 # ============================================================
 
-"""
-Keep your lookup provider behind your own authorized backend.
-
-Expected request:
-
-GET
-AUTHORIZED_LOOKUP_API_BASE?service=<service>&spell=<query>
-
-The backend should return JSON.
-
-Do not expose private contact information for users who have
-not authorized that access.
-"""
-
 AUTHORIZED_LOOKUP_API_BASE = env(
     "AUTHORIZED_LOOKUP_API_BASE",
     required=False,
     default=""
+)
+
+LOOKUP_API_KEY = env(
+    "LOOKUP_API_KEY",
+    required=False,
+    default="" # IMPORTANT: Add your API key to environment variables
 )
 
 # ============================================================
@@ -142,7 +122,7 @@ PAYMENT_QR_IMAGE = env(
     default="payment_qr.png"
 )
 
-BOT_VERSION = "13.0.0"
+BOT_VERSION = "13.0.1"
 
 # IMPORTANT:
 # This is lifetime free usage, NOT daily.
@@ -196,6 +176,7 @@ LOOKUP_SERVICES = {
         "cost": 3,
         "query_type": "mobile",
         "placeholder": "9876543210",
+        "api_service_name": "numberinfo", # Added to map to API service name
     },
 
     "telegram": {
@@ -204,6 +185,7 @@ LOOKUP_SERVICES = {
         "cost": 10,
         "query_type": "username",
         "placeholder": "username",
+        "api_service_name": "tg2num", # Added to map to API service name
     },
 }
 
@@ -875,23 +857,6 @@ def remove_active_session(user_id):
 def get_user(user_id):
     """
     Compatible with existing telegram_users table.
-
-    Existing columns used:
-        telegram_user_id
-        credits
-        total_searches
-        daily_free_used
-        daily_reset_date
-        first_seen
-        last_seen
-        created_at
-        updated_at
-        is_banned
-        unlimited_expiry
-
-    IMPORTANT:
-        daily_free_used is now lifetime free usage.
-        daily_reset_date is intentionally NOT reset.
     """
 
     try:
@@ -933,15 +898,10 @@ def get_user(user_id):
             "telegram_user_id": user_id,
             "credits": 0,
             "total_searches": 0,
-
-            # 0/3 lifetime free lookups used.
             "daily_free_used": 0,
-
-            # Kept only for DB compatibility.
             "daily_reset_date": now_ist().strftime(
                 "%Y-%m-%d"
             ),
-
             "first_seen": iso_now(),
             "last_seen": iso_now(),
             "created_at": iso_now(),
@@ -999,7 +959,6 @@ def get_free_used(user):
 def get_free_remaining(user):
     """
     Lifetime free quota.
-
     NO DAILY RESET.
     """
 
@@ -1014,9 +973,6 @@ def get_free_remaining(user):
 def consume_free_lookup(user_id):
     """
     Consume one lifetime free lookup.
-
-    Uses the existing daily_free_used column
-    so no database migration is required.
     """
 
     with credit_lock:
@@ -1128,7 +1084,6 @@ def add_credits(user_id, amount):
 def deduct_credits(user_id, amount):
     """
     Deduct paid credits only.
-
     Unlimited users do not consume credits.
     """
 
@@ -1460,30 +1415,32 @@ def send_join_required(
 # LOOKUP API
 # ============================================================
 
-def call_lookup_api(service, query):
+def call_lookup_api(service_key, query):
     """
     Calls ONLY the configured authorized backend.
-
-    No provider URL is hardcoded here.
     """
 
     if not AUTHORIZED_LOOKUP_API_BASE:
         return {
             "success": False,
-            "error": (
-                "lookup_backend_not_configured"
-            ),
+            "error": "lookup_backend_not_configured",
         }
 
+    service = LOOKUP_SERVICES.get(service_key)
+    if not service:
+        return {"success": False, "error": "invalid_service_key"}
+
     try:
+        # FIX: Use the correct API service name and query parameter
         params = {
-            "service": service,
-            "spell": query,
+            "api_key": LOOKUP_API_KEY,
+            "service": service.get("api_service_name"),
+            "query": query,
         }
 
         headers = {
             "User-Agent": (
-                "TraceXBot/13.0"
+                f"TraceXBot/{BOT_VERSION}"
             ),
             "Accept": "application/json",
         }
@@ -1547,39 +1504,18 @@ def has_valid_results(result):
     if result.get("error"):
         return False
 
+    # Check for the explicit success flag and data array from the API
     if result.get("success") is True:
-        return True
-
-    data = result.get("data")
-
-    if isinstance(data, list):
-        return len(data) > 0
-
-    if isinstance(data, dict):
-        return bool(data)
-
-    result_value = result.get("result")
-
-    if isinstance(result_value, list):
-        return bool(result_value)
-
-    if isinstance(result_value, dict):
-        return bool(result_value)
-
-    # Generic provider compatibility.
-    for value in result.values():
-        if isinstance(value, (dict, list)):
-            if value:
-                return True
-
-        if value not in (
-            None,
-            "",
-            "none",
-            "null",
-            "n/a",
-        ):
+        data = result.get("data")
+        if isinstance(data, list) and len(data) > 0:
             return True
+
+    # Fallback for other potential formats
+    data = result.get("data")
+    if isinstance(data, list) and data:
+        return True
+    if isinstance(data, dict) and data:
+        return True
 
     return False
 
@@ -2030,8 +1966,6 @@ def process_utr_submission(
             "updated_at": iso_now(),
         }
 
-        # raw_response may not exist in old DB.
-        # Try it first, then fallback to compatible payload.
         try:
             (
                 supabase
@@ -2268,7 +2202,6 @@ def get_lookup_access(
 ):
     """
     Returns:
-
         {
             "allowed": bool,
             "mode": "free" | "credits" | "unlimited" | None,
